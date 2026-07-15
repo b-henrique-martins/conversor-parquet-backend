@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Depends, HTTPException, Header, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,6 +12,8 @@ from enums import Direction
 import storage
 import jobs
 import worker
+
+logger = logging.getLogger("main")
 
 app = FastAPI(title="Parquet <-> CSV Converter")
 
@@ -51,6 +55,21 @@ def require_origin(
 
 
 # --------------------------------------------------------------------------
+# Limpeza oportunista do bucket -- não é um cron de verdade, roda no melhor
+# esforço sempre que alguém acessa o site (/health, chamado pelo wakeServer()
+# do frontend a cada carregamento de página) ou começa uma conversão nova
+# (/api/uploads/presign). Isso faz o bucket convergir pra vazio mesmo que o
+# processo do backend tenha reiniciado entre o fim de uma conversão e a
+# limpeza -- e nunca deixa a limpeza derrubar a request que a disparou.
+# --------------------------------------------------------------------------
+def _safe_sweep():
+    try:
+        storage.sweep_expired()
+    except Exception:
+        logger.exception("Falha na limpeza oportunista do bucket")
+
+
+# --------------------------------------------------------------------------
 # Schemas
 # --------------------------------------------------------------------------
 class PresignRequest(BaseModel):
@@ -71,7 +90,14 @@ class ConvertRequest(BaseModel):
 # --------------------------------------------------------------------------
 @app.post("/api/uploads/presign")
 @limiter.limit(settings.RATE_LIMIT_PRESIGN)
-def presign_upload(request: Request, req: PresignRequest, origin: str = Depends(require_origin)):
+def presign_upload(
+    request: Request,
+    req: PresignRequest,
+    background_tasks: BackgroundTasks,
+    origin: str = Depends(require_origin),
+):
+    background_tasks.add_task(_safe_sweep)
+
     try:
         key = storage.new_object_key(req.filename)
     except ValueError as e:
@@ -128,5 +154,6 @@ def get_job(job_id: str):
 
 
 @app.get("/health")
-def health():
+def health(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_safe_sweep)
     return {"status": "ok"}
