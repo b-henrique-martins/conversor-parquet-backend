@@ -12,6 +12,8 @@ from enums import Direction
 import storage
 import jobs
 import worker
+import preview
+import time
 
 logger = logging.getLogger("main")
 
@@ -84,6 +86,15 @@ class ConvertRequest(BaseModel):
     preserve_decimals: bool = settings.PRESERVE_DECIMALS_DEFAULT
 
 
+class PreviewRequest(BaseModel):
+    object_key: str
+    limit: int = 100
+
+
+class DeleteUploadRequest(BaseModel):
+    object_key: str
+
+
 # --------------------------------------------------------------------------
 # 1. Presign de upload -- o navegador manda o arquivo direto pro B2,
 #    sem passar pela RAM/CPU limitada do Render.
@@ -121,6 +132,8 @@ def start_convert(
     background_tasks: BackgroundTasks,
     origin: str = Depends(require_origin),
 ):
+    
+    time.sleep(10)
     if not req.input_key.startswith("uploads/"):
         raise HTTPException(status_code=400, detail="Chave de entrada inválida")
 
@@ -151,6 +164,52 @@ def get_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job não encontrado")
     return job
+
+
+# --------------------------------------------------------------------------
+# 3. Visualização -- lê só as primeiras linhas direto do bucket via DuckDB,
+#    sem baixar o arquivo inteiro. Aceita tanto uploads/ (aba Visualizar,
+#    que não gera conversão) quanto outputs/ (preview do resultado de uma
+#    conversão, se o frontend quiser oferecer isso também).
+# --------------------------------------------------------------------------
+@app.post("/api/preview")
+@limiter.limit(settings.RATE_LIMIT_PREVIEW)
+def get_preview(request: Request, req: PreviewRequest, origin: str = Depends(require_origin)):
+    if not (req.object_key.startswith("uploads/") or req.object_key.startswith("outputs/")):
+        raise HTTPException(status_code=400, detail="Chave de objeto inválida")
+
+    if not storage.object_exists(req.object_key):
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado (pode já ter expirado)")
+
+    ext = req.object_key.rsplit(".", 1)[-1].lower()
+    if ext not in ("csv", "parquet"):
+        raise HTTPException(status_code=400, detail="Tipo de arquivo não suportado para visualização")
+
+    try:
+        return preview.preview_file(storage.s3_uri(req.object_key), ext, limit=req.limit)
+    except preview.PreviewError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Falha ao gerar preview de %s", req.object_key)
+        raise HTTPException(status_code=500, detail="Falha ao ler o arquivo para visualização")
+
+
+@app.post("/api/uploads/delete")
+@limiter.limit(settings.RATE_LIMIT_PRESIGN)
+def delete_upload(request: Request, req: DeleteUploadRequest, origin: str = Depends(require_origin)):
+    """Apaga um objeto em uploads/ sob demanda -- usado pela aba de
+    Visualização depois que o preview é gerado, já que esses arquivos não
+    alimentam nenhuma conversão e não precisam ficar no bucket até a
+    limpeza de órfãos (6h) passar."""
+    if not req.object_key.startswith("uploads/"):
+        raise HTTPException(status_code=400, detail="Chave de objeto inválida")
+
+    try:
+        storage.delete_object(req.object_key)
+    except Exception:
+        pass  # não crítico -- a limpeza oportunista pega de qualquer forma
+
+    return {"deleted": True}
 
 
 @app.get("/health")
