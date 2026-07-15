@@ -118,3 +118,69 @@ def get_json(key: str) -> dict | None:
         return json.loads(obj["Body"].read())
     except client.exceptions.ClientError:
         return None
+    
+
+
+import datetime as dt
+
+from enums import JobStatus
+
+
+def _list_all(client, prefix: str):
+    continuation = None
+    while True:
+        kwargs = {"Bucket": settings.S3_BUCKET, "Prefix": prefix}
+        if continuation:
+            kwargs["ContinuationToken"] = continuation
+        resp = client.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents", []):
+            yield obj
+        if resp.get("IsTruncated"):
+            continuation = resp.get("NextContinuationToken")
+        else:
+            break
+
+
+def sweep_expired():
+    """Limpeza oportunista do bucket -- não é um cron de verdade, roda no
+    melhor esforço sempre que alguém acessa o site (/health) ou começa uma
+    conversão nova (/api/uploads/presign). Isso faz o bucket convergir pra
+    vazio mesmo que o processo do backend tenha reiniciado entre o fim de
+    uma conversão e a limpeza."""
+    client = get_s3_client()
+    now = dt.datetime.now(dt.timezone.utc)
+    output_cutoff = now - dt.timedelta(seconds=settings.OUTPUT_RETENTION_SECONDS)
+    upload_cutoff = now - dt.timedelta(seconds=settings.ORPHAN_UPLOAD_RETENTION_SECONDS)
+
+    # outputs/: a idade do próprio arquivo já é um proxy seguro -- só
+    # existe depois que a conversão termina de verdade.
+    for obj in _list_all(client, "outputs/"):
+        if obj["LastModified"] < output_cutoff:
+            try:
+                client.delete_object(Bucket=settings.S3_BUCKET, Key=obj["Key"])
+            except Exception:
+                pass
+
+    # uploads/: janela bem maior, só pra pegar órfãos (upload feito mas
+    # /api/convert nunca chamado, ou o processo caiu no meio do caminho).
+    # O caso normal -- conversão concluída -- já é limpo direto pelo
+    # worker.py, sem depender dessa varredura.
+    for obj in _list_all(client, "uploads/"):
+        if obj["LastModified"] < upload_cutoff:
+            try:
+                client.delete_object(Bucket=settings.S3_BUCKET, Key=obj["Key"])
+            except Exception:
+                pass
+
+    # jobs/: só apaga registros já finalizados (done/error) e expirados --
+    # nunca um job pending/processing, mesmo que a data de criação pareça
+    # "velha" (conversão de arquivo grande pode legitimamente demorar).
+    for obj in _list_all(client, "jobs/"):
+        if obj["LastModified"] >= output_cutoff:
+            continue
+        job = get_json(obj["Key"])
+        if job and job.get("status") in (JobStatus.DONE.value, JobStatus.ERROR.value):
+            try:
+                client.delete_object(Bucket=settings.S3_BUCKET, Key=obj["Key"])
+            except Exception:
+                pass
