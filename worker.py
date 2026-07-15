@@ -46,6 +46,7 @@ def run_conversion_job(
             row_count_out=row_count_out,
             decimal_columns_preserved=list(decimal_overrides.keys()),
             download_url=storage.presign_get(output_key),
+            output_key=output_key,
         )
 
     except Exception as e:
