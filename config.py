@@ -28,7 +28,6 @@ class Settings:
     # Rate limit básico (mitiga abuso, não substitui autenticação de verdade)
     RATE_LIMIT_PRESIGN = os.getenv("RATE_LIMIT_PRESIGN", "20/minute")
     RATE_LIMIT_CONVERT = os.getenv("RATE_LIMIT_CONVERT", "10/minute")
-    RATE_LIMIT_PREVIEW = os.getenv("RATE_LIMIT_PREVIEW", "20/minute")
 
     # --- Precisão decimal ---
     # Se true, tenta detectar colunas decimais em CSV->Parquet para evitar
