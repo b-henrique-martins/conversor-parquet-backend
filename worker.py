@@ -16,10 +16,6 @@ def run_conversion_job(
     direction: Direction,
     preserve_decimals: bool,
 ):
-    """Roda a conversão de fato. Executado via BackgroundTasks do FastAPI
-    (portanto fora do ciclo request/response, sem risco de timeout do
-    proxy do Render). Todo o estado é escrito em jobs.py para o frontend
-    consultar via polling."""
     jobs.update(job_id, status=JobStatus.PROCESSING.value)
 
     ext = "csv" if direction == Direction.PARQUET_TO_CSV else "parquet"
@@ -60,10 +56,12 @@ def run_conversion_job(
             except Exception:
                 pass
         jobs.update(job_id, status=JobStatus.ERROR.value, error=str(e))
-        return
 
-    # Conversão ok: o arquivo de entrada não serve mais pra nada.
-    try:
-        storage.delete_object(input_key)
-    except Exception:
-        pass  # não crítico -- só evita acúmulo no bucket
+    finally:
+        # o arquivo de entrada não serve mais pra nada, sucesso ou não --
+        # antes só era apagado no caminho feliz, deixando lixo no bucket
+        # sempre que uma conversão falhava.
+        try:
+            storage.delete_object(input_key)
+        except Exception:
+            pass
