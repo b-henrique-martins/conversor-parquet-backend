@@ -12,8 +12,6 @@ from enums import Direction
 import storage
 import jobs
 import worker
-import preview
-import time
 
 logger = logging.getLogger("main")
 
@@ -132,8 +130,7 @@ def start_convert(
     background_tasks: BackgroundTasks,
     origin: str = Depends(require_origin),
 ):
-    
-    time.sleep(10)
+
     if not req.input_key.startswith("uploads/"):
         raise HTTPException(status_code=400, detail="Chave de entrada inválida")
 
